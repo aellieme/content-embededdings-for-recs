@@ -3,9 +3,10 @@ import numpy as np
 import pandas as pd
 from collections import defaultdict
 from tqdm import tqdm
-from new_basic_feature import add_watch_ratio  # только если нужно
+from new_basic_feature import add_watch_ratio
+from get_data import load_data
 
-# Загружаем сохранённые данные
+# ---------- Загрузка сохранённых данных ----------
 with open("baseline_factors.pkl", "rb") as f:
     data = pickle.load(f)
 
@@ -16,23 +17,27 @@ df_val = data['df_val']
 emb_matrix = data['emb_matrix']
 items_meta = data['items_meta']
 
-# Если df_val уже содержит watch_ratio, то можно пропустить, иначе добавить
-# df_val = add_watch_ratio(df_val, items_meta)  # если не было
-
-# ---------- Контентные эмбеддинги пользователей (также чисто numpy) ----------
-# Загружаем df_train (или сохраняли его тоже)
-from get_data import load_data
+# ---------- Загрузка тренировочных данных ----------
 df_train, _, _, _, _, _ = load_data("up0.01_ir0.01")
 df_train = add_watch_ratio(df_train, items_meta)
 
-user_embeddings = np.zeros((user_factors.shape[0], emb_matrix.shape[1]))
-for user in tqdm(range(user_factors.shape[0]), desc="User embeds"):
-    user_items = df_train[df_train['user_idx'] == user][['item_idx', 'watch_ratio']]
-    if len(user_items) > 0:
-        weights = user_items['watch_ratio'].values.reshape(-1, 1)
-        item_embeds = emb_matrix[user_items['item_idx'].values]
-        user_embeddings[user] = np.average(item_embeds, axis=0, weights=weights.flatten())
+# ---------- Векторизованное вычисление эмбеддингов пользователей ----------
+def compute_user_embeddings(df_train, emb_matrix):
+    grouped = df_train.groupby('user_idx')
+    user_embeds = []
+    for user, group in tqdm(grouped, desc="User embeds", total=len(grouped)):
+        item_indices = group['item_idx'].values
+        weights = group['watch_ratio'].values
+        if len(item_indices) > 0:
+            emb = np.average(emb_matrix[item_indices], axis=0, weights=weights)
+        else:
+            emb = np.zeros(emb_matrix.shape[1])
+        user_embeds.append(emb)
+    return np.array(user_embeds)
 
+user_embeddings = compute_user_embeddings(df_train, emb_matrix)
+
+# ---------- Нормализация ----------
 def normalize_rows(x):
     norm = np.linalg.norm(x, axis=1, keepdims=True)
     return np.divide(x, norm, where=norm!=0, out=np.zeros_like(x))
@@ -40,7 +45,7 @@ def normalize_rows(x):
 user_embeds_norm = normalize_rows(user_embeddings)
 item_embeds_norm = normalize_rows(emb_matrix)
 
-# ---------- Функция предсказания (без implicit) ----------
+# ---------- Гибридный предиктор (без implicit) ----------
 def hybrid_predict_numpy(user_ids, user_factors, item_factors, train_matrix,
                          alpha, user_embeds_norm, item_embeds_norm, N=10):
     hybrid_scores = []
@@ -58,7 +63,6 @@ def hybrid_predict_numpy(user_ids, user_factors, item_factors, train_matrix,
 def evaluate_numpy(user_ids, user_factors, item_factors, train_matrix, val_df,
                    k=10, user_embeds_norm=None, item_embeds_norm=None, alpha=None):
     if alpha is None:
-        # чистый ALS: для каждого пользователя топ-N по скалярному произведению
         recommendations = []
         for user in user_ids:
             scores = user_factors[user] @ item_factors.T
@@ -70,9 +74,11 @@ def evaluate_numpy(user_ids, user_factors, item_factors, train_matrix, val_df,
         recommendations = hybrid_predict_numpy(user_ids, user_factors, item_factors,
                                                train_matrix, alpha,
                                                user_embeds_norm, item_embeds_norm, N=k)
+
     user_true_items = defaultdict(list)
     for _, row in val_df.iterrows():
         user_true_items[row['user_idx']].append(row['item_idx'])
+
     recalls, ndcgs = [], []
     for i, user in enumerate(user_ids):
         true = set(user_true_items[user])
@@ -88,15 +94,13 @@ def evaluate_numpy(user_ids, user_factors, item_factors, train_matrix, val_df,
         ndcgs.append(ndcg)
     return np.mean(recalls), np.mean(ndcgs)
 
-# ---------- Оценка ----------
+# ---------- Оценка baseline ----------
 user_ids = df_val['user_idx'].unique()
-
-# Baseline
 recall_base, ndcg_base = evaluate_numpy(user_ids, user_factors, item_factors,
                                         train_matrix, df_val, k=10)
 print(f"Baseline ALS: Recall@10={recall_base:.4f}, NDCG@10={ndcg_base:.4f}")
 
-# Подбор alpha (на подвыборке)
+# ---------- Подбор alpha на подвыборке ----------
 val_sample = df_val.sample(n=5000, random_state=42)
 sample_user_ids = val_sample['user_idx'].unique()
 alphas = np.linspace(0, 1, 11)
@@ -112,7 +116,7 @@ for alpha in tqdm(alphas, desc="Tuning alpha"):
         best_ndcg = ndcg
         best_alpha = alpha
 
-# Гибрид на полной валидации
+# ---------- Гибрид на полной валидации ----------
 recall_hybrid, ndcg_hybrid = evaluate_numpy(user_ids, user_factors, item_factors,
                                             train_matrix, df_val, k=10,
                                             user_embeds_norm=user_embeds_norm,
