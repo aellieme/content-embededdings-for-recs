@@ -19,7 +19,11 @@ model_baseline = train_als(train_matrix, factors=64, regularization=0.1, iterati
 
 # ---------- Контентные эмбеддинги пользователей ----------
 user_embeddings = np.zeros((train_matrix.shape[0], emb_matrix.shape[1]))
-for user in range(train_matrix.shape[0]):
+from tqdm import tqdm
+for user in tqdm(range(train_matrix.shape[0]), desc="Computing user embeddings"):
+#     ...
+
+# for user in range(train_matrix.shape[0]):
     user_items = df_train[df_train['user_idx'] == user][['item_idx', 'watch_ratio']]
     if len(user_items) > 0:
         weights = user_items['watch_ratio'].values.reshape(-1, 1)
