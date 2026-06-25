@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 from collections import defaultdict
 from tqdm import tqdm
+import gc
 from new_basic_feature import add_watch_ratio
 from get_data import load_data
 
@@ -37,6 +38,10 @@ def compute_user_embeddings(df_train, emb_matrix):
 
 user_embeddings = compute_user_embeddings(df_train, emb_matrix)
 
+# Освобождаем память от df_train (больше не нужен)
+del df_train
+gc.collect()
+
 # ---------- Нормализация ----------
 def normalize_rows(x):
     norm = np.linalg.norm(x, axis=1, keepdims=True)
@@ -44,6 +49,10 @@ def normalize_rows(x):
 
 user_embeds_norm = normalize_rows(user_embeddings)
 item_embeds_norm = normalize_rows(emb_matrix)
+
+# Освобождаем исходный массив (уже не нужен)
+del user_embeddings
+gc.collect()
 
 # ---------- Гибридный предиктор (без implicit) ----------
 def hybrid_predict_numpy(user_ids, user_factors, item_factors, train_matrix,
@@ -94,32 +103,37 @@ def evaluate_numpy(user_ids, user_factors, item_factors, train_matrix, val_df,
         ndcgs.append(ndcg)
     return np.mean(recalls), np.mean(ndcgs)
 
-# ---------- Оценка baseline ----------
-user_ids = df_val['user_idx'].unique()
-recall_base, ndcg_base = evaluate_numpy(user_ids, user_factors, item_factors,
+# ---------- Оценка baseline (на подвыборке для экономии времени) ----------
+# Для baseline берём только 10000 пользователей (можно и всех, но для скорости)
+user_ids_sample = df_val['user_idx'].unique()[:10000]  # или использовать все, если позволяет время
+recall_base, ndcg_base = evaluate_numpy(user_ids_sample, user_factors, item_factors,
                                         train_matrix, df_val, k=10)
-print(f"Baseline ALS: Recall@10={recall_base:.4f}, NDCG@10={ndcg_base:.4f}")
+print(f"Baseline ALS (sample 10k): Recall@10={recall_base:.4f}, NDCG@10={ndcg_base:.4f}")
 
-# ---------- Подбор alpha на подвыборке ----------
-val_sample = df_val.sample(n=5000, random_state=42)
+# ---------- Подбор alpha на очень маленькой подвыборке ----------
+val_sample = df_val.sample(n=500, random_state=42)   # критически мало для памяти
 sample_user_ids = val_sample['user_idx'].unique()
-alphas = np.linspace(0, 1, 11)
+alphas = [0.0, 0.25, 0.5, 0.75, 1.0]                 # всего 5 значений
 best_alpha, best_ndcg = 0, 0
+
 for alpha in tqdm(alphas, desc="Tuning alpha"):
     _, ndcg = evaluate_numpy(sample_user_ids, user_factors, item_factors,
                              train_matrix, val_sample, k=10,
                              user_embeds_norm=user_embeds_norm,
                              item_embeds_norm=item_embeds_norm,
                              alpha=alpha)
-    print(f"alpha={alpha:.1f} -> NDCG@10={ndcg:.4f}")
+    print(f"alpha={alpha:.2f} -> NDCG@10={ndcg:.4f}")
     if ndcg > best_ndcg:
         best_ndcg = ndcg
         best_alpha = alpha
 
-# ---------- Гибрид на полной валидации ----------
-recall_hybrid, ndcg_hybrid = evaluate_numpy(user_ids, user_factors, item_factors,
-                                            train_matrix, df_val, k=10,
+# ---------- Гибрид на полной валидации (или на большей подвыборке) ----------
+# Для финальной оценки можно взять всех, но если память не позволяет – ограничьтесь 20k
+val_full = df_val  # или df_val.sample(n=20000, random_state=42)
+user_ids_full = val_full['user_idx'].unique()
+recall_hybrid, ndcg_hybrid = evaluate_numpy(user_ids_full, user_factors, item_factors,
+                                            train_matrix, val_full, k=10,
                                             user_embeds_norm=user_embeds_norm,
                                             item_embeds_norm=item_embeds_norm,
                                             alpha=best_alpha)
-print(f"Hybrid (alpha={best_alpha:.1f}): Recall@10={recall_hybrid:.4f}, NDCG@10={ndcg_hybrid:.4f}")
+print(f"Hybrid (alpha={best_alpha:.2f}): Recall@10={recall_hybrid:.4f}, NDCG@10={ndcg_hybrid:.4f}")
