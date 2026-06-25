@@ -2,7 +2,6 @@ import numpy as np
 from scipy.sparse import csr_matrix
 from implicit.als import AlternatingLeastSquares
 from implicit.gpu import HAS_CUDA
-from sklearn.metrics.pairwise import cosine_similarity
 
 def create_csr(df, user_col='user_idx', item_col='item_idx', rating_col='watch_ratio'):
     rows = df[user_col].values
@@ -23,20 +22,22 @@ def train_als(matrix, factors=64, regularization=0.1, iterations=15, use_gpu=Tru
     model.fit(matrix)
     return model
 
-def compute_content_scores(user_embeddings, item_embeddings):
-    return cosine_similarity(user_embeddings, item_embeddings)
-
-def hybrid_predict(model, user_ids, train_matrix, alpha, content_scores, N=10):
+def hybrid_predict(model, user_ids, train_matrix, alpha,
+                   user_embeds_norm, item_embeds_norm, N=10):
     """
-    Гибридный предсказатель: alpha * ALS + (1-alpha) * content,
-    с фильтрацией уже просмотренных в train_matrix.
+    Гибрид: alpha * ALS + (1-alpha) * content_score.
+    content_score = косинусное сходство (скалярное произведение нормализованных векторов).
+    Фильтрует уже просмотренные предметы.
     """
     hybrid_scores = []
     for user_idx in user_ids:
+        # ALS-оценка для всех предметов
         als_vec = model.user_factors[user_idx] @ model.item_factors.T
-        cont_vec = content_scores[user_idx]
+        # Контентная оценка (косинусное сходство)
+        cont_vec = user_embeds_norm[user_idx] @ item_embeds_norm.T
+        # Гибрид
         hybrid = alpha * als_vec + (1 - alpha) * cont_vec
-        # Фильтруем предметы, которые пользователь уже видел в обучении
+        # Фильтруем просмотренные
         seen = train_matrix[user_idx].indices
         hybrid[seen] = -np.inf
         top = np.argsort(hybrid)[::-1][:N]

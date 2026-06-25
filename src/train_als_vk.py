@@ -4,7 +4,7 @@ from collections import defaultdict
 
 from get_data import load_data
 from new_basic_feature import add_watch_ratio
-from als_functions import create_csr, train_als, compute_content_scores, hybrid_predict
+from als_functions import create_csr, train_als, hybrid_predict
 
 # Загрузка
 df_train, df_val, items_meta, emb_matrix, user_map, item_map = load_data("up0.01_ir0.01")
@@ -17,7 +17,7 @@ train_matrix = create_csr(df_train)
 print("Training baseline ALS...")
 model_baseline = train_als(train_matrix, factors=64, regularization=0.1, iterations=15, use_gpu=True)
 
-# ---------- Контентные эмбеддинги для пользователей ----------
+# ---------- Контентные эмбеддинги пользователей ----------
 user_embeddings = np.zeros((train_matrix.shape[0], emb_matrix.shape[1]))
 for user in range(train_matrix.shape[0]):
     user_items = df_train[df_train['user_idx'] == user][['item_idx', 'watch_ratio']]
@@ -26,16 +26,23 @@ for user in range(train_matrix.shape[0]):
         item_embeds = emb_matrix[user_items['item_idx'].values]
         user_embeddings[user] = np.average(item_embeds, axis=0, weights=weights.flatten())
 
-print("Computing content scores...")
-content_scores = compute_content_scores(user_embeddings, emb_matrix)  # (n_users, n_items)
+# Нормализация (L2) для косинусного сходства
+def normalize_rows(x):
+    norm = np.linalg.norm(x, axis=1, keepdims=True)
+    return np.divide(x, norm, where=norm!=0, out=np.zeros_like(x))
+
+user_embeds_norm = normalize_rows(user_embeddings)
+item_embeds_norm = normalize_rows(emb_matrix)
 
 # ---------- Единая функция оценки ----------
-def evaluate_model(model, val_df, train_matrix, k=10, content_scores=None, alpha=None):
+def evaluate_model(model, val_df, train_matrix, k=10,
+                   user_embeds_norm=None, item_embeds_norm=None, alpha=None):
     user_ids = val_df['user_idx'].unique()
     if alpha is None:
         recommendations = model.recommend(user_ids, model.item_factors, N=k, filter_already_liked_items=True)
     else:
-        recommendations = hybrid_predict(model, user_ids, train_matrix, alpha, content_scores, N=k)
+        recommendations = hybrid_predict(model, user_ids, train_matrix, alpha,
+                                         user_embeds_norm, item_embeds_norm, N=k)
     
     user_true_items = defaultdict(list)
     for _, row in val_df.iterrows():
@@ -61,7 +68,10 @@ alphas = np.linspace(0, 1, 11)
 best_alpha = 0
 best_ndcg = 0
 for alpha in alphas:
-    _, ndcg = evaluate_model(model_baseline, df_val, train_matrix, k=10, content_scores=content_scores, alpha=alpha)
+    _, ndcg = evaluate_model(model_baseline, df_val, train_matrix, k=10,
+                             user_embeds_norm=user_embeds_norm,
+                             item_embeds_norm=item_embeds_norm,
+                             alpha=alpha)
     print(f"alpha={alpha:.1f} -> NDCG@10={ndcg:.4f}")
     if ndcg > best_ndcg:
         best_ndcg = ndcg
@@ -74,5 +84,7 @@ recall_base, ndcg_base = evaluate_model(model_baseline, df_val, train_matrix, k=
 print(f"\nBaseline ALS: Recall@10={recall_base:.4f}, NDCG@10={ndcg_base:.4f}")
 
 recall_hybrid, ndcg_hybrid = evaluate_model(model_baseline, df_val, train_matrix, k=10,
-                                            content_scores=content_scores, alpha=best_alpha)
+                                            user_embeds_norm=user_embeds_norm,
+                                            item_embeds_norm=item_embeds_norm,
+                                            alpha=best_alpha)
 print(f"Hybrid (alpha={best_alpha:.1f}): Recall@10={recall_hybrid:.4f}, NDCG@10={ndcg_hybrid:.4f}")
